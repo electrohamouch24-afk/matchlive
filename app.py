@@ -10,22 +10,22 @@ app = Flask(__name__)
 @app.after_request
 def add_cors_headers(response):
     """يسمح لأي صفحة ويب (مثل واجهتك الأمامية) بجلب البيانات من هذا الـ API."""
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
 
 # ==============================
 # إعدادات football-data.org
 # ==============================
-# يفضل وضع المفتاح كمتغير بيئة (Environment Variable) باسم FOOTBALL_DATA_TOKEN
-# بدلاً من كتابته مباشرة في الكود، لكن تم توفير قيمة افتراضية هنا للتجربة السريعة.
-FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN", "a716c5d5b9614ff89f550e0642fef54d")
+FOOTBALL_DATA_TOKEN = os.environ.get(
+    "FOOTBALL_DATA_TOKEN", "a716c5d5b9614ff89f550e0642fef54d"
+)
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 
 # البطولات الـ 12 المتاحة على الخطة المجانية لـ football-data.org
-# (رمز كل بطولة + اسمها بالعربية)
+# (رمز كل بطولة + اسمها بالعربية) — محفوظة كما هي
 COMPETITIONS = {
     "WC": "كأس العالم",
     "CL": "دوري أبطال أوروبا",
@@ -42,8 +42,6 @@ COMPETITIONS = {
 }
 COMPETITIONS_PARAM = ",".join(COMPETITIONS.keys())
 
-# تطبيع حالات المباراة القادمة من football-data.org إلى رموز بسيطة
-# يستخدمها الفرونت إند (نفس الأسلوب بغض النظر عن مزوّد البيانات)
 STATUS_MAP = {
     "SCHEDULED": "NS",
     "TIMED": "NS",
@@ -71,12 +69,16 @@ STATUS_LABELS_AR = {
 # كاش بسيط في الذاكرة (In-memory cache)
 # ==============================
 _matches_cache = {"data": None, "timestamp": 0}
-CACHE_TTL_SECONDS = 300  # 5 دقائق (طلب واحد فقط لكل تحديث، لا داعي لكاش أطول)
+CACHE_TTL_SECONDS = 300  # 5 دقائق
 
 
 def parse_utc_timestamp(utc_date_str):
-    """يحوّل صيغة ISO8601 (مثل 2026-07-04T16:00:00Z) إلى unix timestamp."""
-    dt = datetime.strptime(utc_date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    """يحوّل صيغة ISO8601 إلى unix timestamp بشكل آمن."""
+    if not utc_date_str:
+        return 0
+    dt = datetime.fromisoformat(utc_date_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
 
 
@@ -86,8 +88,8 @@ def fetch_major_matches_3_days():
     المجانية لـ football-data.org، بطلب واحد فقط لتوفير حصة الاستخدام اليومية.
     """
     today_utc = datetime.now(timezone.utc).date()
-    date_from = today_utc - timedelta(days=1)   # أمس
-    date_to = today_utc + timedelta(days=2)     # غداً + 1 (dateTo غير شامل، راجع توثيق football-data.org)
+    date_from = today_utc - timedelta(days=1)  # أمس
+    date_to = today_utc + timedelta(days=2)    # بعد غد (dateTo غير شامل في API)
 
     headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
     params = {
@@ -107,7 +109,7 @@ def fetch_major_matches_3_days():
 
     matches = []
     for m in payload.get("matches", []):
-        competition = m.get("competition", {})
+        competition = m.get("competition", {}) or {}
         comp_code = competition.get("code")
         league_name = COMPETITIONS.get(comp_code, competition.get("name", comp_code))
 
@@ -120,10 +122,11 @@ def fetch_major_matches_3_days():
         home_team = m.get("homeTeam", {}) or {}
         away_team = m.get("awayTeam", {}) or {}
 
+        utc_str = m.get("utcDate")
         matches.append({
             "id": m.get("id"),
-            "date": m.get("utcDate"),
-            "timestamp": parse_utc_timestamp(m["utcDate"]),
+            "date": utc_str,
+            "timestamp": parse_utc_timestamp(utc_str),
             "status_short": status_short,
             "status_long": STATUS_LABELS_AR.get(status_short, status_raw),
             "elapsed": m.get("minute"),
@@ -143,68 +146,92 @@ def fetch_major_matches_3_days():
     return matches
 
 
-@app.route('/')
+@app.route("/")
 def home():
     return jsonify({
         "status": "ok",
         "message": "Matches summary API is running (football-data.org)",
-        "endpoints": ["/api/matches"],
+        "endpoints": ["/api/matches", "/api/competitions"],
     })
 
 
-@app.route('/api/matches')
+@app.route("/api/competitions")
+def api_competitions():
+    """يرجع قائمة الأقسام / البطولات المتاحة مع أسمائها العربية."""
+    return jsonify({
+        "success": True,
+        "competitions": [
+            {"id": code, "name": name} for code, name in COMPETITIONS.items()
+        ],
+    })
+
+
+@app.route("/api/matches")
 def api_matches():
     """
-    يرجع مباريات أمس + اليوم + غداً للبطولات الكبرى فقط
-    (كأس العالم، أبطال أوروبا، الدوريات الأوروبية الكبرى، الدوري البرازيلي...).
-    نتائج مخزنة مؤقتاً (كاش) لمدة CACHE_TTL_SECONDS لتقليل عدد الطلبات.
-    استخدم ?refresh=1 لإجبار تحديث الكاش.
+    يرجع مباريات أمس + اليوم + غداً للبطولات الكبرى فقط.
+    يدعم اختيارياً:
+    - ?refresh=1 لإجبار تحديث الكاش
+    - ?league=PL لفلترة بطولة معينة
     """
     now = time.time()
     force_refresh = request.args.get("refresh") == "1"
+    league_filter = request.args.get("league", "").strip().upper()
+
     cache_is_fresh = (
         _matches_cache["data"] is not None
         and (now - _matches_cache["timestamp"]) < CACHE_TTL_SECONDS
     )
 
-    if not force_refresh and cache_is_fresh:
-        return jsonify({
-            "success": True,
-            "cached": True,
-            "cached_at": _matches_cache["timestamp"],
-            "count": len(_matches_cache["data"]),
-            "matches": _matches_cache["data"],
-        })
+    data_source = None
+    stale = False
+    error_msg = None
 
-    try:
-        matches = fetch_major_matches_3_days()
-        _matches_cache["data"] = matches
-        _matches_cache["timestamp"] = now
-        print(f"[matches] fetched {len(matches)} major-league fixtures (yesterday/today/tomorrow)", flush=True)
-        return jsonify({
-            "success": True,
-            "cached": False,
-            "cached_at": now,
-            "count": len(matches),
-            "matches": matches,
-        })
-    except requests.exceptions.RequestException as e:
-        # في حال فشل الطلب، أرجع آخر بيانات مخزنة إن وجدت بدل الفشل الكامل
-        if _matches_cache["data"] is not None:
-            return jsonify({
-                "success": True,
-                "cached": True,
-                "stale": True,
-                "error": str(e),
-                "cached_at": _matches_cache["timestamp"],
-                "count": len(_matches_cache["data"]),
-                "matches": _matches_cache["data"],
-            })
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "matches": [],
-        }), 502
+    if not force_refresh and cache_is_fresh:
+        data_source = _matches_cache["data"]
+        cached = True
+    else:
+        try:
+            fresh_matches = fetch_major_matches_3_days()
+            _matches_cache["data"] = fresh_matches
+            _matches_cache["timestamp"] = now
+            data_source = fresh_matches
+            cached = False
+            print(
+                f"[matches] fetched {len(fresh_matches)} major-league fixtures (yesterday/today/tomorrow)",
+                flush=True,
+            )
+        except requests.exceptions.RequestException as e:
+            if _matches_cache["data"] is not None:
+                data_source = _matches_cache["data"]
+                cached = True
+                stale = True
+                error_msg = str(e)
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": str(e),
+                    "matches": [],
+                }), 502
+
+    filtered_matches = (
+        [m for m in data_source if m.get("league_id") == league_filter]
+        if league_filter
+        else data_source
+    )
+
+    response_payload = {
+        "success": True,
+        "cached": cached,
+        "cached_at": _matches_cache["timestamp"],
+        "count": len(filtered_matches),
+        "matches": filtered_matches,
+    }
+    if stale:
+        response_payload["stale"] = True
+        response_payload["error"] = error_msg
+
+    return jsonify(response_payload)
 
 
 if __name__ == "__main__":
